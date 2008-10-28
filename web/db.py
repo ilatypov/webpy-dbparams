@@ -5,7 +5,7 @@ Database API
 
 __all__ = [
   "UnknownParamstyle", "UnknownDB", "TransactionError", 
-  "sqllist", "sqlors", "reparam", "sqlquote",
+  "sqllist", "one_field_cond", "reparam",
   "SQLQuery", "SQLParam", "sqlparam",
   "SQLLiteral", "sqlliteral",
   "database", 'DB',
@@ -49,20 +49,52 @@ class UnknownParamstyle(Exception):
     """
     pass
     
-class SQLParam:
+class SQLArg:
+    """
+    A base class for SQL statement arguments (e.g., dictionary elements).
+    Executing an SQL statement requires 2 kinds of arguments: parameters and
+    literals.  
+    
+    The database operations implemented below as methods of the DB class will
+    embed literals into the text of the statement.
+
+    The operations will pass parameters separately to the DB API driver along
+    with the parameterized statement.
+    """
+    def __init__(self, value):
+        self.value = value
+
+    def sqlquery(self): 
+        return SQLQuery([self])
+        
+    def __add__(self, other):
+        return self.sqlquery() + other
+        
+    def __radd__(self, other):
+        return other + self.sqlquery()
+
+class SQLParam(SQLArg):
     """Parameter in SQLQuery.
     
+        >>> SQLParam(True)
+        <SQLParam: True>
+        >>> SQLParam(None)
+        <SQLParam: None>
+        >>> SQLParam(1)
+        <SQLParam: 1>
+        >>> SQLParam("joe")
+        <SQLParam: 'joe'>
         >>> q = SQLQuery(["SELECT * FROM test WHERE name=", SQLParam("joe")])
         >>> q
-        <sql: "SELECT * FROM test WHERE name='joe'">
+        <SQLQuery: query 'SELECT * FROM test WHERE name=%s', values ['joe']>
         >>> q.query()
         'SELECT * FROM test WHERE name=%s'
         >>> q.values()
         ['joe']
+        >>> q = "SELECT * FROM test WHERE name=" + SQLParam("joe")
+        >>> q
+        <SQLQuery: query 'SELECT * FROM test WHERE name=%s', values ['joe']>
     """
-    def __init__(self, value):
-        self.value = value
-        
     def get_marker(self, paramstyle='pyformat'):
         if paramstyle == 'qmark':
             return '?'
@@ -72,25 +104,50 @@ class SQLParam:
             return '%s'
         raise UnknownParamstyle, paramstyle
         
-    def sqlquery(self): 
-        return SQLQuery([self])
-        
-    def __add__(self, other):
-        return self.sqlquery() + other
-        
-    def __radd__(self, other):
-        return other + self.sqlquery() 
-            
-    def __str__(self): 
-        return str(self.value)
-    
     def __repr__(self):
-        return '<param: %s>' % repr(self.value)
+        return '<SQLParam: %r>' % self.value
 
-sqlparam =  SQLParam
+sqlparam = SQLParam
+
+class SQLLiteral(SQLArg):
+    """
+    A wrapper for parameters that have to be embedded into the text of the SQL
+    statement.
+
+        >>> reparam("UPDATE table SET accesstime = $accesstime WHERE name = $name",
+        ...     dict(accesstime=sqlliteral("NOW()"), name="joe"))
+        <SQLQuery: query 'UPDATE table SET accesstime = NOW() WHERE name = %s', values ['joe']>
+    """
+    def __repr__(self): 
+        return '<SQLLiteral: %r>' % self.value
+
+sqlliteral = SQLLiteral
+
+def sqlarg(v):
+    """
+    Returns an instance of either SQLParam or SQLLiteral, depending on the
+    argument.
+    """
+    if isinstance(v, SQLLiteral):
+        return v
+    else:
+        return SQLParam(v)
+
+allowed_query_item_types = (str, SQLLiteral, SQLParam)
+
+bad_query_item = lambda x: ValueError(
+        "SQLQuery can only wrap items of types %s; got %s" % (
+            tuple([t.__name__ for t in allowed_query_item_types]), 
+            x,
+        )
+    )
 
 class SQLQuery:
     """
+    Objects of this class are created from a list of strings, parameters and
+    literals.  The .query() method returns the text of the parameterized
+    statement, and the .values() method returns parameter values.
+
     You can pass this sort of thing as a clause in any db function.
     Otherwise, you can pass a dictionary to the keyword argument `vars`
     and the function will call reparam for you.
@@ -98,33 +155,41 @@ class SQLQuery:
     Internally, consists of `items`, which is a list of strings and
     SQLParams, which get concatenated to produce the actual query.
     """
-    # tested in sqlquote's docstring
-    def __init__(self, items=[]):
+    def __init__(self, items=None, sep=None):
         """Creates a new SQLQuery.
         
-            >>> SQLQuery("x")
-            <sql: 'x'>
-            >>> q = SQLQuery(['SELECT * FROM ', 'test', ' WHERE x=', SQLParam(1)])
-            >>> q
-            <sql: 'SELECT * FROM test WHERE x=1'>
-            >>> q.query(), q.values()
-            ('SELECT * FROM test WHERE x=%s', [1])
-            >>> SQLQuery(SQLParam(1))
-            <sql: '1'>
+            >>> SQLQuery("SELECT now()")
+            <SQLQuery: query 'SELECT now()', values []>
+
+            >>> SQLQuery(['SELECT * FROM ', 'test', ' WHERE x=', SQLParam(1)])
+            <SQLQuery: query 'SELECT * FROM test WHERE x=%s', values [1]>
+
+            >>> SQLQuery([SQLParam(1)])
+            <SQLQuery: query '%s', values [1]>
+
+            >>> SQLQuery(["x = " + SQLParam(1)])
+            <SQLQuery: query 'x = %s', values [1]>
         """
-        if isinstance(items, list):
-            self.items = items
-        elif isinstance(items, SQLParam):
-            self.items = [items]
-        elif isinstance(items, SQLQuery):
-            self.items = list(items.items)
+        if items is None:
+            items = []
+        if not isinstance(items, iters):
+            items = [items]
+        if (sep is not None) and items:
+            sep_items = [items[0]]
+            for item in items[1:]:
+                sep_items.append(sep)
+                sep_items.append(item)
         else:
-            self.items = [str(items)]
-            
-        # Take care of SQLLiterals
-        for i, item in enumerate(self.items):
-            if isinstance(item, SQLParam) and isinstance(item.value, SQLLiteral):
-                self.items[i] = item.value.v
+            sep_items = items
+        unwrapped_items = []
+        for x in sep_items:
+            if isinstance(x, SQLQuery):
+                unwrapped_items.extend(x.items)
+            elif isinstance(x, (str, SQLArg)):
+                unwrapped_items.append(x)
+            else:
+                raise bad_query_item(x)
+        self.items = unwrapped_items
 
     def __add__(self, other):
         if isinstance(other, basestring):
@@ -150,17 +215,25 @@ class SQLQuery:
         """
         Returns the query part of the sql query.
             >>> q = SQLQuery(["SELECT * FROM test WHERE name=", SQLParam('joe')])
+            >>> q
+            <SQLQuery: query 'SELECT * FROM test WHERE name=%s', values ['joe']>
             >>> q.query()
             'SELECT * FROM test WHERE name=%s'
             >>> q.query(paramstyle='qmark')
             'SELECT * FROM test WHERE name=?'
         """
-        s = ''
+        m = []
         for x in self.items:
             if isinstance(x, SQLParam):
                 x = x.get_marker(paramstyle)
-            s += x
-        return s
+            elif isinstance(x, SQLLiteral):
+                x = x.value
+            elif isinstance(x, str):
+                pass
+            else:
+                raise bad_query_item(x)
+            m.append(x)
+        return "".join(m)
     
     def values(self):
         """
@@ -171,49 +244,10 @@ class SQLQuery:
         """
         return [i.value for i in self.items if isinstance(i, SQLParam)]
         
-    def join(items, sep=' '):
-        """
-        Joins multiple queries.
-        
-        >>> SQLQuery.join(['a', 'b'], ', ')
-        <sql: 'a, b'>
-        """
-        if len(items) == 0:
-            return SQLQuery("")
-            
-        q = SQLQuery(items[0])
-        for i in items[1:]:
-            q = q + sep + i
-        
-        return q
-    
-    join = staticmethod(join)
-
-    def __str__(self):
-        try:
-            return self.query() % tuple([sqlify(x) for x in self.values()])
-        except (ValueError, TypeError):
-            return self.query()
-
     def __repr__(self):
-        return '<sql: %s>' % repr(str(self))
+        return '<SQLQuery: query %r, values %r>' % (self.query(), self.values())
 
-class SQLLiteral: 
-    """
-    Protects a string from `sqlquote`.
-
-        >>> sqlquote('NOW()')
-        <sql: "'NOW()'">
-        >>> sqlquote(SQLLiteral('NOW()'))
-        <sql: 'NOW()'>
-    """
-    def __init__(self, v): 
-        self.v = v
-
-    def __repr__(self): 
-        return self.v
-
-sqlliteral = SQLLiteral
+allowed_query_item_types += (SQLQuery,)
 
 def reparam(string_, dictionary): 
     """
@@ -221,7 +255,7 @@ def reparam(string_, dictionary):
     using values from the dictionary. Returns an `SQLQuery` for the result.
 
         >>> reparam("s = $s", dict(s=True))
-        <sql: "s = 't'">
+        <SQLQuery: query 's = %s', values [True]>
     """
     dictionary = dictionary.copy() # eval mucks with it
     vals = []
@@ -229,35 +263,10 @@ def reparam(string_, dictionary):
     for live, chunk in _interpolate(string_):
         if live:
             v = eval(chunk, dictionary)
-            result.append(sqlparam(v))
+            result.append(sqlarg(v))
         else: 
             result.append(chunk)
-    return SQLQuery.join(result, '')
-
-def sqlify(obj): 
-    """
-    converts `obj` to its proper SQL version
-
-        >>> sqlify(None)
-        'NULL'
-        >>> sqlify(True)
-        "'t'"
-        >>> sqlify(3)
-        '3'
-    """
-    # because `1 == True and hash(1) == hash(True)`
-    # we have to do this the hard way...
-
-    if obj is None:
-        return 'NULL'
-    elif obj is True:
-        return "'t'"
-    elif obj is False:
-        return "'f'"
-    elif datetime and isinstance(obj, datetime.datetime):
-        return repr(obj.isoformat())
-    else:
-        return repr(obj)
+    return SQLQuery(result)
 
 def sqllist(lst): 
     """
@@ -275,56 +284,51 @@ def sqllist(lst):
     else:
         return ', '.join(lst)
 
-def sqlors(left, lst):
+def one_field_cond(left, lst):
     """
     `left is a SQL clause like `tablename.arg = ` 
     and `lst` is a list of values. Returns a reparam-style
     pair featuring the SQL that ORs together the clause
     for each item in the lst.
 
-        >>> sqlors('foo = ', [])
-        <sql: '2+2=5'>
-        >>> sqlors('foo = ', [1])
-        <sql: 'foo = 1'>
-        >>> sqlors('foo = ', 1)
-        <sql: 'foo = 1'>
-        >>> sqlors('foo = ', [1,2,3])
-        <sql: '(foo = 1 OR foo = 2 OR foo = 3)'>
+        >>> one_field_cond('foo = ', [])
+        <SQLQuery: query '%s', values [True]>
+        >>> one_field_cond('foo = ', [1])
+        <SQLQuery: query 'foo = %s', values [1]>
+        >>> one_field_cond('foo = ', 1)
+        <SQLQuery: query 'foo = %s', values [1]>
+        >>> one_field_cond('foo = ', [1, 2, 3])
+        <SQLQuery: query '(foo = %s OR foo = %s OR foo = %s)', values [1, 2, 3]>
+        >>> one_field_cond('foo = ', [1, sqlliteral('now()'), 3])
+        <SQLQuery: query '(foo = %s OR foo = now() OR foo = %s)', values [1, 3]>
     """
     if isinstance(lst, iters):
         lst = list(lst)
         ln = len(lst)
         if ln == 0:
-            return SQLQuery("2+2=5")
+            return SQLQuery([SQLParam(True)])
         if ln == 1:
             lst = lst[0]
 
     if isinstance(lst, iters):
-        return '(' + SQLQuery.join([left + sqlparam(x) for x in lst], ' OR ') + ')'
+        return '(' + SQLQuery([left + sqlarg(x) for x in lst], ' OR ') + ')'
     else:
-        return left + sqlparam(lst)
+        return left + sqlarg(lst)
         
-def sqlwhere(dictionary, grouping=' AND '): 
+def multi_field_clause(vars, grouping=' AND '): 
     """
-    Converts a `dictionary` to an SQL WHERE clause `SQLQuery`.
+    Converts a list of name-value pairs `vars` to an `SQLQuery` clause.
     
-        >>> sqlwhere({'cust_id': 2, 'order_id':3})
-        <sql: 'order_id = 3 AND cust_id = 2'>
-        >>> sqlwhere({'cust_id': 2, 'order_id':3}, grouping=', ')
-        <sql: 'order_id = 3, cust_id = 2'>
-        >>> sqlwhere({'a': 'a', 'b': 'b'}).query()
-        'a = %s AND b = %s'
+        >>> multi_field_clause([('order_id', 3), ('cust_id', 2)])
+        <SQLQuery: query 'order_id = %s AND cust_id = %s', values [3, 2]>
+        >>> multi_field_clause([('order_id', 3), ('cust_id', 2)], grouping=', ')
+        <SQLQuery: query 'order_id = %s, cust_id = %s', values [3, 2]>
+        >>> multi_field_clause([('stamp', sqlliteral('now()')), ('order_id', 3)], grouping=', ')
+        <SQLQuery: query 'stamp = now(), order_id = %s', values [3]>
     """
-    return SQLQuery.join([k + ' = ' + sqlparam(v) for k, v in dictionary.items()], grouping)
-
-def sqlquote(a): 
-    """
-    Ensures `a` is quoted properly for use in a SQL query.
-
-        >>> 'WHERE x = ' + sqlquote(True) + ' AND y = ' + sqlquote(3)
-        <sql: "WHERE x = 't' AND y = 3">
-    """
-    return sqlparam(a).sqlquery()
+    if isinstance(vars, dict):
+        vars = vars.items()
+    return SQLQuery([k + ' = ' + sqlarg(v) for k, v in vars], grouping)
 
 class Transaction:
     """Database transaction."""
@@ -529,7 +533,7 @@ class DB:
     
     def _where(self, where, vars): 
         if isinstance(where, (int, long)):
-            where = "id = " + sqlparam(where)
+            where = "id = " + sqlarg(where)
         #@@@ for backward-compatibility
         elif isinstance(where, (list, tuple)) and len(where) == 2:
             where = SQLQuery(where[0], where[1])
@@ -547,11 +551,11 @@ class DB:
         
             >>> db = DB(None, {})
             >>> db.query("SELECT * FROM foo", _test=True)
-            <sql: 'SELECT * FROM foo'>
-            >>> db.query("SELECT * FROM foo WHERE x = $x", vars=dict(x='f'), _test=True)
-            <sql: "SELECT * FROM foo WHERE x = 'f'">
-            >>> db.query("SELECT * FROM foo WHERE x = " + sqlquote('f'), _test=True)
-            <sql: "SELECT * FROM foo WHERE x = 'f'">
+            <SQLQuery: query 'SELECT * FROM foo', values []>
+            >>> db.query("SELECT * FROM foo WHERE x = $x", vars=dict(x=False), _test=True)
+            <SQLQuery: query 'SELECT * FROM foo WHERE x = %s', values [False]>
+            >>> db.query("SELECT * FROM foo WHERE x = " + sqlarg(False), _test=True)
+            <SQLQuery: query 'SELECT * FROM foo WHERE x = %s', values [False]>
         """
         if vars is None: vars = {}
         
@@ -590,14 +594,14 @@ class DB:
         
             >>> db = DB(None, {})
             >>> db.select('foo', _test=True)
-            <sql: 'SELECT * FROM foo'>
+            <SQLQuery: query 'SELECT * FROM foo', values []>
             >>> db.select(['foo', 'bar'], where="foo.bar_id = bar.id", limit=5, _test=True)
-            <sql: 'SELECT * FROM foo, bar WHERE foo.bar_id = bar.id LIMIT 5'>
+            <SQLQuery: query 'SELECT * FROM foo, bar WHERE foo.bar_id = bar.id LIMIT 5', values []>
         """
         if vars is None: vars = {}
         sql_clauses = self.sql_clauses(what, tables, where, group, order, limit, offset)
         clauses = [self.gen_clause(sql, val, vars) for sql, val in sql_clauses if val is not None]
-        qout = SQLQuery.join(clauses)
+        qout = SQLQuery(clauses, ' ')
         if _test: return qout
         return self.query(qout, processed=True)
     
@@ -608,16 +612,16 @@ class DB:
         
             >>> db = DB(None, {})
             >>> db.where('foo', bar_id=3, _test=True)
-            <sql: 'SELECT * FROM foo WHERE bar_id = 3'>
+            <SQLQuery: query 'SELECT * FROM foo WHERE bar_id = %s', values [3]>
             >>> db.where('foo', source=2, crust='dewey', _test=True)
-            <sql: "SELECT * FROM foo WHERE source = 2 AND crust = 'dewey'">
+            <SQLQuery: query 'SELECT * FROM foo WHERE source = %s AND crust = %s', values [2, 'dewey']>
         """
         where = []
         for k, v in kwargs.iteritems():
-            where.append(k + ' = ' + sqlquote(v))
+            where.append(k + ' = ' + sqlarg(v))
         return self.select(table, what=what, order=order, 
                group=group, limit=limit, offset=offset, _test=_test, 
-               where=SQLQuery.join(where, ' AND '))
+               where=SQLQuery(where, ' AND '))
     
     def sql_clauses(self, what, tables, where, group, order, limit, offset): 
         return (
@@ -632,9 +636,9 @@ class DB:
     def gen_clause(self, sql, val, vars): 
         if isinstance(val, (int, long)):
             if sql == 'WHERE':
-                nout = 'id = ' + sqlquote(val)
+                nout = 'id = ' + sqlarg(val)
             else:
-                nout = SQLQuery(val)
+                nout = SQLQuery(str(val))
         #@@@
         elif isinstance(val, (list, tuple)) and len(val) == 2:
             nout = SQLQuery(val[0], val[1]) # backwards-compatibility
@@ -658,7 +662,7 @@ class DB:
             >>> db = DB(None, {})
             >>> q = db.insert('foo', name='bob', age=2, created=SQLLiteral('NOW()'), _test=True)
             >>> q
-            <sql: "INSERT INTO foo (age, name, created) VALUES (2, 'bob', NOW())">
+            <SQLQuery: query 'INSERT INTO foo (age, name, created) VALUES (%s, %s, NOW())', values [2, 'bob']>
             >>> q.query()
             'INSERT INTO foo (age, name, created) VALUES (%s, %s, NOW())'
             >>> q.values()
@@ -667,8 +671,8 @@ class DB:
         def q(x): return "(" + x + ")"
         
         if values:
-            _keys = SQLQuery.join(values.keys(), ', ')
-            _values = SQLQuery.join([sqlparam(v) for v in values.values()], ', ')
+            _keys = SQLQuery(values.keys(), ', ')
+            _values = SQLQuery([sqlarg(v) for v in values.values()], ', ')
             sql_query = "INSERT INTO %s " % tablename + q(_keys) + ' VALUES ' + q(_values)
         else:
             sql_query = SQLQuery("INSERT INTO %s DEFAULT VALUES" % tablename)
@@ -709,7 +713,7 @@ class DB:
             >>> db.supports_multiple_insert = True
             >>> values = [{"name": "foo", "email": "foo@example.com"}, {"name": "bar", "email": "bar@example.com"}]
             >>> db.multiple_insert('person', values=values, _test=True)
-            <sql: "INSERT INTO person (name, email) VALUES ('foo', 'foo@example.com'), ('bar', 'bar@example.com')">
+            <SQLQuery: query 'INSERT INTO person (name, email) VALUES (%s, %s), (%s, %s)', values ['foo', 'foo@example.com', 'bar', 'bar@example.com']>
         """        
         if not values:
             return []
@@ -733,9 +737,9 @@ class DB:
 
         data = []
         for row in values:
-            d = SQLQuery.join([SQLParam(row[k]) for k in keys], ', ')
+            d = SQLQuery([SQLParam(row[k]) for k in keys], ', ')
             data.append('(' + d + ')')
-        sql_query += SQLQuery.join(data, ', ')
+        sql_query += SQLQuery(data, ', ')
 
         if _test: return sql_query
 
@@ -773,7 +777,7 @@ class DB:
             >>> q = db.update('foo', where='name = $name', name='bob', age=2,
             ...     created=SQLLiteral('NOW()'), vars=locals(), _test=True)
             >>> q
-            <sql: "UPDATE foo SET age = 2, name = 'bob', created = NOW() WHERE name = 'Joseph'">
+            <SQLQuery: query 'UPDATE foo SET age = %s, name = %s, created = NOW() WHERE name = %s', values [2, 'bob', 'Joseph']>
             >>> q.query()
             'UPDATE foo SET age = %s, name = %s, created = NOW() WHERE name = %s'
             >>> q.values()
@@ -784,7 +788,7 @@ class DB:
 
         query = (
           "UPDATE " + sqllist(tables) + 
-          " SET " + sqlwhere(values, ', ') + 
+          " SET " + multi_field_clause(values, ', ') + 
           " WHERE " + where)
 
         if _test: return query
@@ -802,7 +806,7 @@ class DB:
             >>> db = DB(None, {})
             >>> name = 'Joe'
             >>> db.delete('foo', where='name = $name', vars=locals(), _test=True)
-            <sql: "DELETE FROM foo WHERE name = 'Joe'">
+            <SQLQuery: query 'DELETE FROM foo WHERE name = %s', values ['Joe']>
         """
         if vars is None: vars = {}
         where = self._where(where, vars)
