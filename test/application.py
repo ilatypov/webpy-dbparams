@@ -2,6 +2,7 @@ import webtest
 import time
 
 import web
+import urllib
 
 data = """
 import web
@@ -97,6 +98,30 @@ class ApplicationTest(webtest.TestCase):
             return web.ctx.path + ":" + handler()
         app.add_processor(processor)
         self.assertEquals(app.request('/blog/foo').data, '/blog/foo:blog foo')
+    
+    def test_subdomains(self):
+        def create_app(name):
+            urls = ("/", "index")
+            class index:
+                def GET(self):
+                    return name
+            return web.application(urls, locals())
+        
+        urls = (
+            "a.example.com", create_app('a'),
+            "b.example.com", create_app('b'),
+            ".*.example.com", create_app('*')
+        )
+        app = web.subdomain_application(urls, locals())
+        
+        def test(host, expected_result):
+            result = app.request('/', host=host)
+            self.assertEquals(result.data, expected_result)
+            
+        test('a.example.com', 'a')
+        test('b.example.com', 'b')
+        test('c.example.com', '*')
+        test('d.example.com', '*')
         
     def test_redirect(self):
         urls = (
@@ -162,7 +187,61 @@ class ApplicationTest(webtest.TestCase):
         assert state.x == 1 and state.y == 1, repr(state)
         app.request('/foo')
         assert state.x == 1 and state.y == 2, repr(state)
-
+        
+    def testUnicodeInput(self):
+        urls = (
+            "/.*", "foo"
+        )
+        class foo:
+            def GET(self):
+                i = web.input(name='')
+                return repr(i.name)
+                
+            def POST(self):
+                return repr(web.data())
+                i = web.input(name={})
+                return repr(i)
+                
+        app = web.application(urls, locals())
+        
+        def f(name):
+            path = '/?' + urllib.urlencode({"name": name})
+            self.assertEquals(app.request(path).data, repr(name))
+            
+        f(u'\u1234')
+        f(u'foo')
+        
+        data = '--boundary\r\nContent-Disposition: form-data; name="name"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\na\r\n--boundary--\r\n'
+        headers = {'Content-Type': 'multipart/form-data; boundary=--boundary'}
+        response = app.request('/', method="POST", data=data, headers=headers)
+        #self.assertEquals(response.data, 'a')
+        
+    def testCustomNotFound(self):
+        urls_a = ("/", "a")
+        urls_b = ("/", "b")
+        
+        app_a = web.application(urls_a, locals())
+        app_b = web.application(urls_b, locals())
+        
+        app_a.notfound = lambda: web.HTTPError("404 Not Found", {}, "not found 1")
+        
+        urls = (
+            "/a", app_a,
+            "/b", app_b
+        )
+        app = web.application(urls, locals())
+        
+        def assert_notfound(path, message):
+            response = app.request(path)
+            self.assertEquals(response.status.split()[0], "404")
+            self.assertEquals(response.data, message)
+            
+        assert_notfound("/a/foo", "not found 1")
+        assert_notfound("/b/foo", "not found")
+        
+        app.notfound = lambda: web.HTTPError("404 Not Found", {}, "not found 2")
+        assert_notfound("/a/foo", "not found 1")
+        assert_notfound("/b/foo", "not found 2")
+    
 if __name__ == '__main__':
     webtest.main()
-

@@ -113,6 +113,10 @@ def storify(mapping, *requireds, **defaults):
     
         >>> storify({'x': 'a'}, _unicode=True)
         <Storage {'x': u'a'}>
+        >>> storify({'x': storage(value='a')}, x={}, _unicode=True)
+        <Storage {'x': <Storage {'value': 'a'}>}>
+        >>> storify({'x': storage(value='a')}, _unicode=True)
+        <Storage {'x': u'a'}>
     """
     _unicode = defaults.pop('_unicode', False)
     def unicodify(s):
@@ -201,7 +205,8 @@ def lstrips(text, remove):
     return _strips('l', text, remove)
 
 def strips(text, remove):
-    """removes the string `remove` from the both sides of `text`
+    """
+    removes the string `remove` from the both sides of `text`
 
         >>> strips("foobarfoo", "foo")
         'bar'
@@ -210,7 +215,8 @@ def strips(text, remove):
     return rstrips(lstrips(text, remove), remove)
 
 def safeunicode(obj, encoding='utf-8'):
-    r"""Converts any given object to unicode string.
+    r"""
+    Converts any given object to unicode string.
     
         >>> safeunicode('hello')
         u'hello'
@@ -230,7 +236,8 @@ def safeunicode(obj, encoding='utf-8'):
             return str(obj).decode(encoding)
     
 def safestr(obj, encoding='utf-8'):
-    r"""Converts any given object to utf-8 encoded string. 
+    r"""
+    Converts any given object to utf-8 encoded string. 
     
         >>> safestr('hello')
         'hello'
@@ -411,6 +418,8 @@ iterbetter = IterBetter
 
 def dictreverse(mapping):
     """
+    Returns a new dictionary with keys and values swapped.
+    
         >>> dictreverse({1: 2, 3: 4})
         {2: 1, 4: 3}
     """
@@ -667,7 +676,8 @@ def nthstr(n):
     return {1: '%sst', 2: '%snd', 3: '%srd'}.get(n % 10, '%sth') % n
 
 def cond(predicate, consequence, alternative=None):
-    """Function replacement for if-else to use in expressions.
+    """
+    Function replacement for if-else to use in expressions.
         
         >>> x = 2
         >>> cond(x % 2 == 0, "even", "odd")
@@ -730,15 +740,17 @@ class Profile:
         stime = time.time() - stime
         prof.close()
 
-        def print_stats():
-            stats = hotshot.stats.load(temp.name)
-            stats.strip_dirs()
-            stats.sort_stats('time', 'calls')
-            stats.print_stats(40)
-            stats.print_callers()
-    
+        import cStringIO
+        out = cStringIO.StringIO()
+        stats = hotshot.stats.load(temp.name)
+        stats.stream = out
+        stats.strip_dirs()
+        stats.sort_stats('time', 'calls')
+        stats.print_stats(40)
+        stats.print_callers()
+
         x =  '\n\ntook '+ str(stime) + ' seconds\n'
-        x += capturestdout(print_stats)()
+        x += out.getvalue()
 
         return result, x
 
@@ -799,7 +811,8 @@ def tryall(context, prefix=None):
         print ' '*2, str(key)+':', value
         
 class ThreadedDict:
-    """Thread local storage.
+    """
+    Thread local storage.
     
         >>> d = ThreadedDict()
         >>> d.x = 1

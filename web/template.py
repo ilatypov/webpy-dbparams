@@ -46,7 +46,8 @@ from webapi import config
 from net import websafe
 
 def splitline(text):
-    r"""Splits the given text at newline.
+    r"""
+    Splits the given text at newline.
     
         >>> splitline('foo\nbar')
         ('foo\n', 'bar')
@@ -419,7 +420,7 @@ class Parser:
         r"""
             >>> read_block_section = Parser('').read_block_section
             >>> read_block_section('for i in range(10): hello $i\nfoo')
-            (<block: 'for i in range(10):', [<line: [t' hello ', $i, t'\n']>]>, 'foo')
+            (<block: 'for i in range(10):', [<line: [t'hello ', $i, t'\n']>]>, 'foo')
             >>> read_block_section('for i in range(10):\n        hello $i\n    foo', begin_indent='    ')
             (<block: 'for i in range(10):', [<line: [t'hello ', $i, t'\n']>]>, '    foo')
             >>> read_block_section('for i in range(10):\n  hello $i\nfoo')
@@ -431,7 +432,7 @@ class Parser:
         
         # if there is some thing left in the line
         if line.strip():
-            block = line
+            block = line.lstrip()
         else:
             def find_indent(text):
                 rx = re_compile('  +')
@@ -670,7 +671,8 @@ import __builtin__
 TEMPLATE_BUILTINS = dict([(name, getattr(__builtin__, name)) for name in TEMPLATE_BUILTIN_NAMES if name in __builtin__.__dict__])
 
 class ForLoop:
-    """Wrapper for expression in for stament to support loop.xxx helpers.
+    """
+    Wrapper for expression in for stament to support loop.xxx helpers.
     
         >>> loop = ForLoop()
         >>> for x in loop.setup(['a', 'b', 'c']):
@@ -818,6 +820,11 @@ class Template(BaseTemplate):
         text = text.replace('\r\n', '\n').replace('\r', '\n').expandtabs()
         if not text.endswith('\n'):
             text += '\n'
+
+        # ignore BOM chars at the begining of template
+        BOM = '\xef\xbb\xbf'
+        if text.startswith(BOM):
+            text = text[len(BOM):]
         
         # support fort \$ for backward-compatibility 
         text = text.replace(r'\$', '$$')
@@ -906,8 +913,11 @@ class Render:
     def __init__(self, loc='templates', cache=None, base=None, **keywords):
         self._loc = loc
         self._keywords = keywords
+
+        if cache is None:
+            cache = not config.get('debug', False)
         
-        if cache or not config.get('debug', False):
+        if cache:
             self._cache = {}
         else:
             self._cache = None
@@ -960,13 +970,36 @@ class Render:
         else:
             return self._template(name)
 
+class GAE_Render(Render):
+    # Render gets over-written. make a copy here.
+    super = Render
+    def __init__(self, loc, *a, **kw):
+        GAE_Render.super.__init__(self, loc, *a, **kw)
+        
+        import types
+        if isinstance(loc, types.ModuleType):
+            self.mod = loc
+        else:
+            name = loc.rstrip('/').replace('/', '.')
+            self.mod = __import__(name, None, None, ['x'])
+
+        self.mod.__dict__.update(kw.get('builtins', TEMPLATE_BUILTINS))
+        self.mod.__dict__.update(Template.globals)
+        self.mod.__dict__.update(kw.get('globals', {}))
+
+    def _load_template(self, name):
+        t = getattr(self.mod, name)
+        import types
+        if isinstance(t, types.ModuleType):
+            return GAE_Render(t, cache=self._cache is not None, base=self._base, **self._keywords)
+        else:
+            return t
+
 render = Render
 # setup render for Google App Engine.
 try:
     from google import appengine
-    def render(loc):
-        name = loc.rstrip('/').replace('/', '.')
-        return __import__(name, None, None, ['x'])        
+    render = Render = GAE_Render
 except ImportError:
     pass
         
@@ -984,7 +1017,9 @@ def compile_templates(root):
         
         out = open(os.path.join(dirpath, '__init__.py'), 'w')
         out.write('from web.template import CompiledTemplate, ForLoop\n\n')
-        
+        if dirnames:
+            out.write("import " + ", ".join(dirnames))
+
         for f in filenames:
             path = os.path.join(dirpath, f)
 
@@ -1195,25 +1230,30 @@ def test():
     Test if, for and while.
     
         >>> t('$if 1: 1')()
-        u' 1\n'
+        u'1\n'
         >>> t('$if 1:\n    1')()
         u'1\n'
         >>> t('$if 1:\n    1\\')()
         u'1'
         >>> t('$if 0: 0\n$elif 1: 1')()
-        u' 1\n'
+        u'1\n'
         >>> t('$if 0: 0\n$elif None: 0\n$else: 1')()
-        u' 1\n'
+        u'1\n'
         >>> t('$if 0 < 1 and 1 < 2: 1')()
-        u' 1\n'
+        u'1\n'
         >>> t('$for x in [1, 2, 3]: $x')()
-        u' 1\n 2\n 3\n'
+        u'1\n2\n3\n'
         >>> t('$def with (d)\n$for k, v in d.iteritems(): $k')({1: 1})
-        u' 1\n'
+        u'1\n'
         >>> t('$for x in [1, 2, 3]:\n\t$x')()
         u'    1\n    2\n    3\n'
         >>> t('$def with (a)\n$while a and a.pop():1')([1, 2, 3])
         u'1\n1\n1\n'
+
+    The space after : must be ignored.
+    
+        >>> t('$if True: foo')()
+        u'foo\n'
     
     Test loop.xxx.
 
@@ -1231,9 +1271,9 @@ def test():
         >>> t('$ a = {1: 1}\n$a.keys()[0]')()
         u'1\n'
         >>> t('$ a = []\n$if not a: 1')()
-        u' 1\n'
+        u'1\n'
         >>> t('$ a = {}\n$if not a: 1')()
-        u' 1\n'
+        u'1\n'
         >>> t('$ a = -1\n$a')()
         u'-1\n'
         >>> t('$ a = "1"\n$a')()
@@ -1309,6 +1349,7 @@ def test():
         NameError: global name 'min' is not defined
         
     Test vars.
+    
         >>> x = t('$var x: 1')()
         >>> x.x
         u'1'
@@ -1318,6 +1359,11 @@ def test():
         >>> x = t('$var x:  \n    foo\n    bar')()
         >>> x.x
         u'foo\nbar\n'
+
+    Test BOM chars.
+
+        >>> t('\xef\xbb\xbf$def with(x)\n$x')('foo')
+        u'foo\n'
     """
     pass
             

@@ -13,6 +13,14 @@ class DBTest(webtest.TestCase):
         # there might be some error with the current connection, delete from a new connection
         self.db = webtest.setup_database(self.dbname)
         self.db.query('DROP TABLE person')
+        
+    def _testable(self):
+        try:
+            webtest.setup_database(self.dbname)
+            return True
+        except ImportError, e:
+            print >> web.debug, str(e), "(ignoring the %s tests)" % self.dbname
+            return False
     
     def testUnicode(self):
         """Bug#177265: unicode queries throw errors"""
@@ -79,6 +87,12 @@ class DBTest(webtest.TestCase):
         assert db.select("person", where="name='a'")
         assert db.select("person", where="name='b'")
 
+    def testUnicode(self):
+        db = webtest.setup_database(self.dbname)
+        self.db.insert('person', False, name='user')
+        name = db.select('person')[0].name
+        self.assertEquals(type(name), unicode)
+
 class SqliteTest(DBTest):
     dbname = "sqlite"
     
@@ -93,6 +107,13 @@ class MySQLTest(DBTest):
         self.db = webtest.setup_database(self.dbname)
         # In mysql, transactions are supported only with INNODB engine.
         self.db.query("CREATE TABLE person (name text, email text) ENGINE=INNODB")
+
+
+# ignore db tests when the required db adapter is not found.
+for t in [DBTest, MySQLTest, SqliteTest]:
+    if not t('_testable')._testable():
+        del globals()[t.__name__]
+        pass
 
 if __name__ == '__main__':
     webtest.main()

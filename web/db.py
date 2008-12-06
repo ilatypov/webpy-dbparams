@@ -21,10 +21,11 @@ from utils import threadeddict, storage, iters, iterbetter
 
 try:
     # db module can work independent of web.py
-    from webapi import debug
+    from webapi import debug, config
 except:
     import sys
     debug = sys.stderr
+    config = storage()
 
 class UnknownDB(Exception):
     """raised for unsupported dbms"""
@@ -286,13 +287,13 @@ def sqllist(lst):
 
 def one_field_cond(left, lst):
     """
-    `left is a SQL clause like `tablename.arg = ` 
+    `left` is a SQL clause like `tablename.arg = ` 
     and `lst` is a list of values. Returns a reparam-style
     pair featuring the SQL that ORs together the clause
     for each item in the lst.
 
         >>> one_field_cond('foo = ', [])
-        <SQLQuery: query '%s', values [True]>
+        <SQLQuery: query '%s', values [False]>
         >>> one_field_cond('foo = ', [1])
         <SQLQuery: query 'foo = %s', values [1]>
         >>> one_field_cond('foo = ', 1)
@@ -306,7 +307,7 @@ def one_field_cond(left, lst):
         lst = list(lst)
         ln = len(lst)
         if ln == 0:
-            return SQLQuery([SQLParam(True)])
+            return SQLQuery([SQLParam(False)])
         if ln == 1:
             lst = lst[0]
 
@@ -408,7 +409,7 @@ class DB:
         
         self._ctx = threadeddict()
         # flag to enable/disable printing queries
-        self.printing = False
+        self.printing = config.get('debug', False)
         self.supports_multiple_insert = False
         
         try:
@@ -419,7 +420,7 @@ class DB:
             self.has_pooling = False
             
         # Pooling can be disabled by passing pooling=False in the keywords.
-        self.has_pooling = self.has_pooling and self.keywords.pop('pooling', True)        
+        self.has_pooling = self.keywords.pop('pooling', True) and self.has_pooling
             
     def _getctx(self): 
         if not self._ctx.get('db'):
@@ -510,7 +511,7 @@ class DB:
     def _db_execute(self, cur, sql_query): 
         """executes an sql query"""
         self.ctx.dbq_count += 1
-
+        
         try:
             a = time.time()
             paramstyle = getattr(self, 'paramstyle', 'pyformat')
@@ -878,6 +879,12 @@ class MySQLDB(DB):
         if 'pw' in keywords:
             keywords['passwd'] = keywords['pw']
             del keywords['pw']
+
+        if 'charset' not in keywords:
+            keywords['charset'] = 'utf8'
+        elif keywords['charset'] is None:
+            del keywords['charset']
+
         self.paramstyle = db.paramstyle = 'pyformat' # it's both, like psycopg
         self.dbname = "mysql"
         self.supports_multiple_insert = True
@@ -1013,7 +1020,8 @@ def database(dburl=None, **params):
         raise UnknownDB, dbn
 
 def register_database(name, clazz):
-    """Register a database.
+    """
+    Register a database.
 
         >>> class LegacyDB(DB): 
         ...     def __init__(self, **params): 

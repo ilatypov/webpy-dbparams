@@ -13,6 +13,13 @@ def attrget(obj, attr, value=None):
     return value
 
 class Form:
+    r"""
+    HTML form.
+    
+        >>> f = Form(Textbox("x"))
+        >>> f.render()
+        '<table>\n    <tr><th><label for="x">x</label></th><td><input type="text" name="x" id="x" /></td></tr>\n</table>'
+    """
     def __init__(self, *inputs, **kw):
         self.inputs = inputs
         self.valid = True
@@ -29,11 +36,22 @@ class Form:
         out += self.rendernote(self.note)
         out += '<table>\n'
         for i in self.inputs:
-            out += '   <tr><th><label for="%s">%s</label></th>' % (i.id, net.websafe(i.description))
-            out += "<td>"+i.pre+i.render()+i.post+"</td>"
+            out += '    <tr><th><label for="%s">%s</label></th>' % (i.id, net.websafe(i.description))
+            out += "<td>"+i.pre+i.render()+i.post+"</td></tr>\n"
         out += "</table>"
         return out
-
+        
+    def render_css(self): 
+        out = [] 
+        out.append(self.rendernote(self.note)) 
+        for i in self.inputs: 
+            out.append('<label for="%s">%s</label>' % (i.id, net.websafe(i.description))) 
+            out.append(i.pre) 
+            out.append(i.render()) 
+            out.append(i.post) 
+            out.append('\n') 
+        return ''.join(out) 
+        
     def rendernote(self, note):
         if note: return '<strong class="wrong">%s</strong>' % net.websafe(note)
         else: return ""
@@ -69,7 +87,9 @@ class Form:
         raise KeyError, i
 
     def __getattr__(self, name):
-        for x in self.inputs:
+        # don't interfere with deepcopy
+        inputs = self.__dict__.get('inputs') or []
+        for x in inputs:
             if x.name == name: return x
         raise AttributeError, name
     
@@ -210,6 +230,7 @@ class Hidden(Input):
     def render(self):
         x = '<input type="hidden" name="%s"' % net.websafe(self.name)
         if self.value: x += ' value="%s"' % net.websafe(self.value)
+        x += self.addatts()
         x += ' />'
         return x
 
@@ -237,3 +258,7 @@ class regexp(Validator):
     
     def valid(self, value):
         return bool(self.rexp.match(value))
+
+if __name__ == "__main__":
+    import doctest
+    doctest.testmod()
