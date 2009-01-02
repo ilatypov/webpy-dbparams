@@ -15,6 +15,7 @@ import itertools
 import os
 import re
 import types
+from exceptions import SystemExit
 
 try:
     import wsgiref.handlers
@@ -46,6 +47,9 @@ class application:
         self.mapping = mapping
         self.fvars = fvars
         self.processors = []
+        
+        self.add_processor(loadhook(self._load))
+        self.add_processor(unloadhook(self._unload))
 
         if autoreload:
             def main_module_name():
@@ -86,7 +90,37 @@ class application:
                     __import__(main_module_name())
                 except ImportError:
                     pass
-
+                    
+    def _load(self):
+        web.ctx.app_stack.append(self)
+        
+    def _unload(self):
+        web.ctx.app_stack = web.ctx.app_stack[:-1]
+        
+        if not web.ctx.app_stack:
+            # this is the top-most application
+            self._cleanup_threadlocal()
+        else:
+            # this is a sub-application, revert ctx to earlier state.
+            oldctx = web.ctx.get('_oldctx')
+            if oldctx:
+                web.ctx.home = oldctx.home
+                web.ctx.homepath = oldctx.homepath
+                web.ctx.path = oldctx.path
+                web.ctx.fullpath = oldctx.fullpath
+                    
+    def _cleanup_threadlocal(self):
+        return
+        #@@@
+        # Since the CherryPy Webserver uses thread pool, the thread-local state is never cleared.
+        # This interferes with the other requests. 
+        # clearing the thread-local storage to avoid that.
+        # see utils.ThreadedDict for details
+        import threading
+        t = threading.currentThread()
+        if hasattr(t, '_d'):
+            del t._d
+    
     def add_mapping(self, pattern, classname):
         self.mapping += (pattern, classname)
         
@@ -175,7 +209,8 @@ class application:
         if 'HTTP_CONTENT_TYPE' in env:
             env['CONTENT_TYPE'] = env.pop('HTTP_CONTENT_TYPE')
 
-        if data:
+        if method in ["POST", "PUT"]:
+            data = data or ''
             import StringIO
             if isinstance(data, dict):
                 q = urllib.urlencode(data)
@@ -188,8 +223,13 @@ class application:
         def start_response(status, headers):
             response.status = status
             response.headers = dict(headers)
+            response.header_items = headers
         response.data = "".join(self.wsgifunc()(env, start_response))
         return response
+
+    def browser(self):
+        import browser
+        return browser.AppBrowser(self)
 
     def handle(self):
         fn, args = self._match(self.mapping, web.ctx.path)
@@ -198,7 +238,6 @@ class application:
     def handle_with_processors(self):
         def process(processors):
             try:
-                web.ctx.app_stack.append(self)
                 if processors:
                     p, processors = processors[0], processors[1:]
                     return p(lambda: process(processors))
@@ -206,15 +245,14 @@ class application:
                     return self.handle()
             except web.HTTPError:
                 raise
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except:
                 print >> web.debug, traceback.format_exc()
                 raise self.internalerror()
-                    
-        try:
-            # processors must be applied in the resvere order. (??)
-            return process(self.processors)
-        finally:
-            web.ctx.app_stack = web.ctx.app_stack[:-1]
+        
+        # processors must be applied in the resvere order. (??)
+        return process(self.processors)
                         
     def wsgifunc(self, *middleware):
         """Returns a WSGI-compatible function for this application."""
@@ -229,41 +267,30 @@ class application:
                 firstchunk = iterator.next()
             except StopIteration:
                 firstchunk = ''
-            
+
             return itertools.chain([firstchunk], iterator)    
                                 
         def is_generator(x): return x and hasattr(x, 'next')
         
         def wsgi(env, start_resp):
             self.load(env)
-
             try:
                 # allow uppercase methods only
                 if web.ctx.method.upper() != web.ctx.method:
                     raise web.nomethod()
 
                 result = self.handle_with_processors()
+                if is_generator(result):
+                    result = peep(result)
+                else:
+                    result = [result]
             except web.HTTPError, e:
-                result = e.data
+                result = [e.data]
 
-            if is_generator(result):
-                result = peep(result)
-            else:
-                result = [utils.utf8(result)]
+            result = web.utf8(iter(result))
 
             status, headers = web.ctx.status, web.ctx.headers
             start_resp(status, headers)
-
-            #@@@
-            # Since the CherryPy Webserver uses thread pool, the thread-local state is never cleared.
-            # This interferes with the other requests. 
-            # clearing the thread-local storage to avoid that.
-            # see utils.ThreadedDict for details
-            import threading
-            t = threading.currentThread()
-            if hasattr(t, '_d'):
-                del t._d
-        
             return result
 
         for m in middleware: 
@@ -302,13 +329,16 @@ class application:
     def load(self, env):
         """Initializes ctx using env."""
         ctx = web.ctx
+        ctx.clear()
         ctx.status = '200 OK'
         ctx.headers = []
         ctx.output = ''
         ctx.environ = ctx.env = env
         ctx.host = env.get('HTTP_HOST')
 
-        if env.get('HTTPS', '').lower() in ['on', 'true']:
+        if env.get('wsgi.url_scheme') in ['http', 'https']:
+            ctx.protocol = env['wsgi.url_scheme']
+        elif env.get('HTTPS', '').lower() in ['on', 'true', '1']:
             ctx.protocol = 'https'
         else:
             ctx.protocol = 'http'
@@ -404,18 +434,12 @@ class application:
         
         @@Any issues with when used with yield?
         """
-        try:
-            oldctx = web.storage(web.ctx)
-            web.ctx.home += dir
-            web.ctx.homepath += dir
-            web.ctx.path = web.ctx.path[len(dir):]
-            web.ctx.fullpath = web.ctx.fullpath[len(dir):]
-            return app.handle_with_processors()
-        finally:
-            web.ctx.home = oldctx.home
-            web.ctx.homepath = oldctx.homepath
-            web.ctx.path = oldctx.path
-            web.ctx.fullpath = oldctx.fullpath
+        web.ctx._oldctx = web.storage(web.ctx)
+        web.ctx.home += dir
+        web.ctx.homepath += dir
+        web.ctx.path = web.ctx.path[len(dir):]
+        web.ctx.fullpath = web.ctx.fullpath[len(dir):]
+        return app.handle_with_processors()
             
     def get_parent_app(self):
         if self in web.ctx.app_stack:
@@ -489,7 +513,7 @@ class subdomain_application(application):
         >>> class hello:
         ...     def GET(self): return "hello"
         >>>
-        >>> mapping = ("hello.example.com", app)
+        >>> mapping = (r"hello\.example\.com", app)
         >>> app2 = subdomain_application(mapping)
         >>> app2.request("/hello", host="hello.example.com").data
         'hello'
@@ -540,10 +564,27 @@ def unloadhook(h):
         >>> app.add_processor(unloadhook(f))    
     """
     def processor(handler):
-        try:
-            return handler()
-        finally:
+        result = handler()
+        is_generator = result and hasattr(result, 'next')
+
+        if is_generator:
+            return wrap(result)
+        else:
             h()
+            return result
+            
+    def wrap(result):
+        def next():
+            try:
+                return result.next()
+            except:
+                # call the hook at the and of iterator
+                h()    
+                raise
+
+        result = iter(result)
+        while True:
+            yield next()
             
     return processor
 
@@ -610,7 +651,7 @@ class Reloader:
                 self.mtimes[mod] = mtime
             except ImportError: 
                 pass
-
+                
 if __name__ == "__main__":
     import doctest
     doctest.testmod()

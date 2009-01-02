@@ -3,7 +3,7 @@
 
 from __future__ import generators
 
-__version__ = "0.3"
+__version__ = "0.31"
 __author__ = [
     "Aaron Swartz <me@aaronsw.com>",
     "Anand Chitipothu <anandology@gmail.com>"
@@ -25,6 +25,8 @@ from webapi import *
 from httpserver import *
 from debugerror import *
 from application import *
+from browser import *
+import test
 try:
     import webopenid as openid
 except ImportError:

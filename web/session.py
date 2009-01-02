@@ -148,17 +148,17 @@ class Store:
     """Base class for session stores"""
 
     def __contains__(self, key):
-        raise NotImplemented
+        raise NotImplementedError
 
     def __getitem__(self, key):
-        raise NotImplemented
+        raise NotImplementedError
 
     def __setitem__(self, key, value):
-        raise NotImplemented
+        raise NotImplementedError
 
     def cleanup(self, timeout):
         """removes all the expired sessions"""
-        raise NotImplemented
+        raise NotImplementedError
 
     def encode(self, session_dict):
         """encodes session dict as a string"""
@@ -276,6 +276,41 @@ class DBStore(Store):
         timeout = datetime.timedelta(timeout/(24.0*60*60)) #timedelta takes numdays as arg
         last_allowed_time = datetime.datetime.now() - timeout
         self.db.delete(self.table, where="$last_allowed_time > atime", vars=locals())
+
+class ShelfStore:
+    """Store for saving session using `shelve` module.
+
+        import shelve
+        store = ShelfStore(shelve.open('session.shelf'))
+
+    XXX: is shelve thread-safe?
+    """
+    def __init__(self, shelf):
+        self.shelf = shelf
+
+    def __contains__(self, key):
+        return key in self.shelf
+
+    def __getitem__(self, key):
+        atime, v = self.shelf[key]
+        self[key] = v # update atime
+        return v
+
+    def __setitem__(self, key, value):
+        self.shelf[key] = time.time(), value
+        
+    def __delitem__(self, key):
+        try:
+            del self.shelf[key]
+        except KeyError:
+            pass
+
+    def cleanup(self, timeout):
+        now = time.time()
+        for k in self.shelf.keys():
+            atime, v = self.shelf[k]
+            if now - atime > timeout :
+                del self[k]
 
 if __name__ == '__main__' :
     import doctest
