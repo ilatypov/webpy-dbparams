@@ -113,7 +113,8 @@ sqlparam = SQLParam
 class SQLLiteral(SQLArg):
     """
     A wrapper for parameters that have to be embedded into the text of the SQL
-    statement.
+    statement.  This should not be used with unprocessed user input to avoid
+    SQL injection attacks.
 
         >>> reparam("UPDATE table SET accesstime = $accesstime WHERE name = $name",
         ...     dict(accesstime=sqlliteral("NOW()"), name="joe"))
@@ -267,6 +268,8 @@ def reparam(string_, dictionary):
 
         >>> reparam("s = $s", dict(s=True))
         <SQLQuery: query 's = %s', values [True]>
+        >>> reparam("s IN $s", dict(s=[1, 2]))
+        <SQLQuery: query 's IN (%s, %s)', values [1, 2]>
     """
     dictionary = dictionary.copy() # eval mucks with it
     vals = []
@@ -274,7 +277,16 @@ def reparam(string_, dictionary):
     for live, chunk in _interpolate(string_):
         if live:
             v = eval(chunk, dictionary)
-            result.append(sqlarg(v))
+            if isinstance(v, iters):
+                result.append("(")
+                if v:
+                    result.append(sqlarg(v[0]))
+                    for item in v[1:]:
+                        result.append(", ")
+                        result.append(sqlarg(item))
+                result.append(")")
+            else:
+                result.append(sqlarg(v))
         else: 
             result.append(chunk)
     return SQLQuery(result)
@@ -545,9 +557,6 @@ class DB:
     def _where(self, where, vars): 
         if isinstance(where, (int, long)):
             where = "id = " + sqlarg(where)
-        #@@@ for backward-compatibility
-        elif isinstance(where, (list, tuple)) and len(where) == 2:
-            where = SQLQuery(where[0], where[1])
         elif isinstance(where, SQLQuery):
             pass
         else:
@@ -650,9 +659,6 @@ class DB:
                 nout = 'id = ' + sqlarg(val)
             else:
                 nout = SQLQuery(str(val))
-        #@@@
-        elif isinstance(val, (list, tuple)) and len(val) == 2:
-            nout = SQLQuery(val[0], val[1]) # backwards-compatibility
         elif isinstance(val, SQLQuery):
             nout = val
         else:
@@ -992,6 +998,30 @@ class MSSQLDB(DB):
         keywords['database'] = keywords.pop('db')
         self.dbname = "mssql"
         DB.__init__(self, db, keywords)
+
+    def sql_clauses(self, what, tables, where, group, order, limit, offset): 
+        return (
+            ('SELECT', what),
+            ('TOP', limit),
+            ('FROM', sqllist(tables)),
+            ('WHERE', where),
+            ('GROUP BY', group),
+            ('ORDER BY', order),
+            ('OFFSET', offset))
+            
+    def _test(self):
+        """Test LIMIT.
+
+            Fake presence of pymssql module for running tests.
+            >>> import sys
+            >>> sys.modules['pymssql'] = sys.modules['sys']
+            
+            MSSQL has TOP clause instead of LIMIT clause.
+            >>> db = MSSQLDB(db='test', user='joe', pw='secret')
+            >>> db.select('foo', limit=4, _test=True)
+            <SQLQuery: query 'SELECT * TOP 4 FROM foo', values []>
+        """
+        pass
 
 class OracleDB(DB): 
     def __init__(self, **keywords): 

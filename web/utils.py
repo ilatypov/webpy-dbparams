@@ -250,7 +250,7 @@ def safestr(obj, encoding='utf-8'):
         return obj.encode('utf-8')
     elif isinstance(obj, str):
         return obj
-    elif hasattr(obj, 'next'): # iterator
+    elif hasattr(obj, 'next') and hasattr(obj, '__iter__'): # iterator
         return itertools.imap(safestr, obj)
     else:
         return str(obj)
@@ -565,6 +565,9 @@ def datestr(then, now=None):
         now = datetime.datetime.fromtimestamp(now)
     if type(then).__name__ == "DateTime":
         then = datetime.datetime.fromtimestamp(then)
+    elif type(then).__name__ == "date":
+        then = datetime.datetime(then.year, then.month, then.day)
+
     delta = now - then
     deltaseconds = int(delta.days * oneday + delta.seconds + delta.microseconds * 1e-06)
     deltadays = abs(deltaseconds) // oneday
@@ -636,17 +639,34 @@ def commify(n):
         '1,234'
         >>> commify(1234567890)
         '1,234,567,890'
+        >>> commify(123.0)
+        '123.0'
+        >>> commify(1234.5)
+        '1,234.5'
+        >>> commify(1234.56789)
+        '1,234.56789'
+        >>> commify('%.2f' % 1234.5)
+        '1,234.50'
         >>> commify(None)
         >>>
-    
+
     """
     if n is None: return None
+    n = str(n)
+    if '.' in n:
+        dollars, cents = n.split('.')
+    else:
+        dollars, cents = n, None
+
     r = []
-    for i, c in enumerate(reversed(str(n))):
+    for i, c in enumerate(reversed(str(dollars))):
         if i and (not (i % 3)):
             r.insert(0, ',')
         r.insert(0, c)
-    return ''.join(r)
+    out = ''.join(r)
+    if cents:
+        out += '.' + cents
+    return out
 
 def dateify(datestring):
     """
@@ -1008,6 +1028,7 @@ def sendmail(from_address, to_address, subject, message, headers=None, **kw):
             p.stdin.close()
             p.wait()
         else:
+            import os
             i, o = os.popen2(["/usr/lib/sendmail", '-f', from_address] + recipients)
             i.write(message)
             i.close()
